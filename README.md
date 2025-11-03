@@ -1,6 +1,6 @@
-# Calculator Webhook Test
+# Calculator
 
-A simple calculator with webhook logging for debugging.
+A calculator with configuration management.
 
 ## Installation
 ```bash
@@ -9,13 +9,7 @@ pip install -e .
 
 ## Usage
 ```python
-from calculator import Calculator
-calc = Calculator()
-result = calc.add(2, 3)
-```
-
-## Testing
-
-```bash
-python test.py
+from calculator import AdvancedCalculator
+calc = AdvancedCalculator()
+result = calc.add(5, 3)
 ```
